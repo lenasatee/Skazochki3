@@ -1,70 +1,81 @@
 import os
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ContentType
+from aiogram.utils import executor
 
 API_TOKEN = os.getenv('API_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 genai.configure(api_key=GEMINI_API_KEY)
+client = genai.Client()
 
 app = FastAPI()
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()  # Без аргументов в aiogram 3.x
 
-# Актуальная модель TTS (flash — быстрее, pro — качественнее)
-model_name = "gemini-2.5-flash-preview-tts"  # Или "gemini-2.5-pro-preview-tts"
+model_name = "gemini-2.5-flash-preview-tts"  # Актуальная TTS-модель (быстрая и качественная)
 
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
-    await message.reply("Hi! Send me English fairy tale text, and I'll narrate it with Gemini 2.5 TTS! ✨")
+    await message.reply("Hello! Send me English fairy tale text, and I'll narrate it with Gemini 2.5 magic voice! ✨\nExample: Once upon a time...")
 
-@dp.message_handler(content_types=ContentType.TEXT)
+@dp.message_handler()
 async def tts_handler(message: types.Message):
     text = message.text
-    if len(text) > 3000:
-        await message.reply("Text too long! Split into parts.")
+    if len(text) > 2000:
+        await message.reply("Text too long! Split into parts (max ~2000 chars).")
         return
 
-    await message.reply("Generating magical narration... 🎙️")
+    await message.reply("Generating fairy tale narration... 🎙️")
 
     try:
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content(
-            text,
-            generation_config=genai.types.GenerationConfig(
-                response_mime_type="audio/wav"  # Или "audio/pcm" если нужно
+        response = client.models.generate_content(
+            model=model_name,
+            contents=text,
+            config=types.GenerateContentConfig(
+                response_modalities=["AUDIO"]
             )
         )
 
-        audio_data = response.parts[0].inline_data.data
+        # Аудио в response (обычно в parts как binary data)
+        audio_data = response.candidates[0].content.parts[0].inline_data.data
 
-        with open("output.wav", "wb") as f:
+        with open("/tmp/output.wav", "wb") as f:
             f.write(audio_data)
 
-        with open("output.wav", "rb") as audio_file:
-            await message.answer_voice(audio_file, caption="Your fairy tale narrated by Gemini 2.5! 📖🔊")
+        with open("/tmp/output.wav", "rb") as audio_file:
+            await message.answer_voice(audio_file, caption="Your English fairy tale narrated by Gemini 2.5! 📖🔊")
 
-        os.remove("output.wav")
+        os.remove("/tmp/output.wav")
     except Exception as e:
-        await message.reply(f"Oops: {str(e)}")
+        await message.reply(f"Oops, error: {str(e)}\nMaybe try shorter text or check logs.")
 
-@app.on_event("startup")
-async def on_startup():
+async def on_startup(_):
     webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook/{API_TOKEN}"
     await bot.set_webhook(webhook_url)
 
-@app.post(f"/webhook/{{API_TOKEN}}")
-async def webhook(request: Request, API_TOKEN: str):
+async def on_shutdown(_):
+    await bot.delete_webhook()
+
+@app.post("/webhook/{API_TOKEN}")
+async def webhook(request: Request):
     update = types.Update.parse_raw(await request.json())
     await dp.process_update(update)
     return {"ok": True}
 
 @app.get("/")
 async def root():
-    return {"message": "Fairy tale bot is alive!"}
+    return {"message": "Fairy tale bot is alive and ready to narrate! ✨"}
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    executor.start_webhook(
+        dispatcher=dp,
+        webhook_path=f"/webhook/{API_TOKEN}",
+        on_startup=on_startup,
+        on_shutdown=on_shutdown,
+        skip_updates=True,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8000))
+    )
