@@ -1,9 +1,15 @@
 import os
 import wave
+import logging
+from aiohttp import web
 from google import genai
 from google.genai import types
-from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, Router
+from aiogram.filters import CommandStart
+from aiogram.types import Message
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
+logging.basicConfig(level=logging.INFO)
 
 API_TOKEN = os.getenv('API_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -11,25 +17,25 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 genai.configure(api_key=GEMINI_API_KEY)
 client = genai.Client()
 
-app = FastAPI()
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher()  # В aiogram 3 бот привязывается автоматически при обработке
+dp = Dispatcher()
+router = Router()
 
-model_name = "gemini-2.5-flash-preview-tts"  # Топовый быстрый TTS
+model_name = "gemini-2.5-flash-preview-tts"  # Быстрый и экспрессивный TTS для сказок
 
-@dp.message_handler(commands=['start'])
-async def start(message: types.Message):
-    await message.reply("Hello! Send me English fairy tale text, and I'll narrate it with expressive Gemini 2.5 voice! ✨\n"
-                        "Try: Once upon a time there was a beautiful princess...")
+@router.message(CommandStart())
+async def start(message: Message):
+    await message.reply("Hello! Send me English fairy tale text, and I'll narrate it with magical Gemini 2.5 voice! ✨\n"
+                        "Example: Once upon a time in a kingdom far away...")
 
-@dp.message_handler()
-async def tts_handler(message: types.Message):
+@router.message()
+async def tts_handler(message: Message):
     text = message.text.strip()
     if len(text) > 1500:
-        await message.reply("Text too long! Keep it under ~1500 characters for best quality.")
+        await message.reply("Text too long! Keep it under 1500 characters for best result.")
         return
 
-    await message.reply("Brewing magical narration... 🎙️")
+    await message.reply("Weaving fairy tale magic into voice... 🎙️")
 
     try:
         response = client.models.generate_content(
@@ -40,22 +46,20 @@ async def tts_handler(message: types.Message):
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name="Kore"  # Мягкий женский голос для сказок (Aoede, Leda, Puck тоже крутые)
+                            voice_name="Kore"  # Мягкий женский голос (попробуй Aoede, Leda, Puck для других)
                         )
                     )
                 )
             )
         )
 
-        # Аудио в PCM (raw data)
         pcm_data = response.candidates[0].content.parts[0].inline_data.data
 
-        # Конвертируем в WAV
         output_path = "/tmp/output.wav"
         with wave.open(output_path, "wb") as wf:
-            wf.setnchannels(1)          # Моно
-            wf.setsampwidth(2)          # 16-bit
-            wf.setframerate(24000)      # Стандарт для Gemini TTS
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(24000)
             wf.writeframes(pcm_data)
 
         with open(output_path, "rb") as audio_file:
@@ -63,33 +67,27 @@ async def tts_handler(message: types.Message):
 
         os.remove(output_path)
     except Exception as e:
-        await message.reply(f"Oops: {str(e)}. Try shorter text or check if TTS preview is available.")
+        await message.reply(f"Oops, something went wrong: {str(e)}")
 
-async def on_startup():
-    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook/{API_TOKEN}"
+dp.include_router(router)
+
+async def on_startup(app: web.Application):
+    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook"
     await bot.set_webhook(webhook_url)
-    print("Webhook set!")
+    logging.info(f"Webhook set to {webhook_url}")
 
-async def on_shutdown():
+async def on_shutdown(app: web.Application):
     await bot.delete_webhook()
-    print("Webhook deleted.")
 
-@app.on_event("startup")
-async def startup_event():
-    await on_startup()
+app = web.Application()
+app["bot"] = bot
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    await on_shutdown()
+setup_application(app, dp, bot=bot)
 
-@app.post("/webhook/{token}")
-async def webhook(request: Request, token: str):
-    if token != API_TOKEN:
-        return {"ok": False}
-    update = types.Update.parse_raw(await request.json())
-    await dp.process_update(update)
-    return {"ok": True}
+app.on_startup.append(on_startup)
+app.on_shutdown.append(on_shutdown)
 
-@app.get("/")
-async def root():
-    return {"message": "English Fairy Tales Bot is alive and ready to tell stories! ✨"}
+SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
+
+if __name__ == "__main__":
+    web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
