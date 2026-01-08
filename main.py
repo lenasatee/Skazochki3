@@ -1,6 +1,7 @@
 import os
 from google import genai
 from google.genai import types
+import wave
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
@@ -13,61 +14,66 @@ client = genai.Client()
 
 app = FastAPI()
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher()  # Без аргументов в aiogram 3.x
+dp = Dispatcher(bot)
 
-model_name = "gemini-2.5-flash-preview-tts"  # Актуальная TTS-модель (быстрая и качественная)
+model_name = "gemini-2.5-flash-preview-tts"  # Отличный голос для сказок, быстрый
 
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
-    await message.reply("Hello! Send me English fairy tale text, and I'll narrate it with Gemini 2.5 magic voice! ✨\nExample: Once upon a time...")
+    await message.reply("Hello! Send me English fairy tale text, and I'll narrate it with expressive Gemini 2.5 voice! ✨\n"
+                        "Example: Once upon a time there lived a little girl...")
 
 @dp.message_handler()
 async def tts_handler(message: types.Message):
-    text = message.text
-    if len(text) > 2000:
-        await message.reply("Text too long! Split into parts (max ~2000 chars).")
+    text = message.text.strip()
+    if len(text) > 1500:  # Лимит для стабильности (TTS лучше работает с короткими текстами)
+        await message.reply("Text too long! Split into parts (max ~1500 symbols).")
         return
 
-    await message.reply("Generating fairy tale narration... 🎙️")
+    await message.reply("Generating enchanting narration... 🎙️")
 
     try:
+        # Генерация аудио
         response = client.models.generate_content(
             model=model_name,
             contents=text,
             config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"]
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name="Kore"  # Красивый женский голос, можно попробовать Puck, Fenrir, Aoede, Charon
+                        )
+                    )
+                )
             )
         )
 
-        # Аудио в response (обычно в parts как binary data)
-        audio_data = response.candidates[0].content.parts[0].inline_data.data
+        # Аудио в PCM формате (raw)
+        pcm_data = response.candidates[0].content.parts[0].inline_data.data
 
-        with open("/tmp/output.wav", "wb") as f:
-            f.write(audio_data)
+        # Сохраняем в WAV (Telegram любит WAV/OGG, но voice принимает WAV)
+        output_path = "/tmp/output.wav"
+        with wave.open(output_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(24000)  # Стандарт для Gemini TTS
+            wf.writeframes(pcm_data)
 
-        with open("/tmp/output.wav", "rb") as audio_file:
-            await message.answer_voice(audio_file, caption="Your English fairy tale narrated by Gemini 2.5! 📖🔊")
+        with open(output_path, "rb") as audio_file:
+            await message.answer_voice(audio_file, caption="Your fairy tale narrated by Gemini 2.5! 📖🔊")
 
-        os.remove("/tmp/output.wav")
+        os.remove(output_path)
     except Exception as e:
-        await message.reply(f"Oops, error: {str(e)}\nMaybe try shorter text or check logs.")
+        await message.reply(f"Error: {str(e)}\nTry shorter text or another voice.")
 
 async def on_startup(_):
     webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook/{API_TOKEN}"
     await bot.set_webhook(webhook_url)
+    print("Webhook set")
 
 async def on_shutdown(_):
     await bot.delete_webhook()
-
-@app.post("/webhook/{API_TOKEN}")
-async def webhook(request: Request):
-    update = types.Update.parse_raw(await request.json())
-    await dp.process_update(update)
-    return {"ok": True}
-
-@app.get("/")
-async def root():
-    return {"message": "Fairy tale bot is alive and ready to narrate! ✨"}
 
 if __name__ == "__main__":
     executor.start_webhook(
